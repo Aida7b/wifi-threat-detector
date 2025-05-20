@@ -1,4 +1,3 @@
-
 import time
 import datetime
 import os
@@ -10,14 +9,14 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import subprocess
 import json
+import threading
 
 # === CONFIGURATION ===
 LOG_FILE = "network_log.txt"
-MONITOR_DURATION = 30  # seconds
+MONITOR_INTERVAL = 10  # seconds
 
-# Gmail account that sends the alert
 SENDER_EMAIL = "space.art0007@gmail.com"
-SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password without spaces
+SENDER_PASSWORD = "esugedhsjlukpqwm"
 
 # === FUNCTIONS ===
 
@@ -63,6 +62,16 @@ def get_ssid():
         return "Unknown"
     return "Unknown"
 
+def get_bssid():
+    try:
+        result = subprocess.check_output("netsh wlan show interfaces", shell=True).decode()
+        for line in result.splitlines():
+            if "BSSID" in line:
+                return line.split(":")[1].strip()
+    except Exception:
+        return "Unknown"
+    return "Unknown"
+
 def geolocate_ip(ip):
     try:
         res = requests.get(f"http://ip-api.com/json/{ip}").json()
@@ -87,67 +96,51 @@ def generate_map(ip):
     else:
         print("Map generation failed.")
 
-def check_if_trusted():
-    ssid = get_ssid()
-    try:
-        result = subprocess.check_output("netsh wlan show interfaces", shell=True).decode()
-        bssid = "Unknown"
-        for line in result.splitlines():
-            if "BSSID" in line:
-                bssid = line.split(":")[1].strip()
+def check_if_trusted(ssid, bssid):
+    if not os.path.exists("trusted_networks.json"):
+        return False
 
-        if not os.path.exists("trusted_networks.json"):
-            return
+    with open("trusted_networks.json", "r") as f:
+        trusted = json.load(f)
 
-        with open("trusted_networks.json", "r") as f:
-            trusted = json.load(f)
+    if ssid in trusted:
+        expected_bssid = trusted[ssid]["bssid"]
+        if bssid != expected_bssid:
+            print(f"\nALERT: SSID '{ssid}' is trusted, but BSSID has changed!")
+            print(f"Expected BSSID: {expected_bssid}, Current BSSID: {bssid}")
+            return True
+    else:
+        print(f"\n'{ssid}' is not in your trusted network list.")
+        return True
+    return False
 
-        if ssid in trusted:
-            expected_bssid = trusted[ssid]["bssid"]
-            if bssid != expected_bssid:
-                print(f"\nALERT: SSID '{ssid}' is trusted, but BSSID has changed!")
-                print(f"Expected BSSID: {expected_bssid}, Current BSSID: {bssid}")
-        else:
-            print(f"\n'{ssid}' is not in your trusted network list.")
+def background_monitor(receiver_email):
+    print("\n[Background Monitoring Started]")
+    last_bssid = get_bssid()
 
-    except Exception as e:
-        print(f"Trust check failed: {e}")
-
-def start_monitoring(receiver_email):
-    print("\nStarting network monitoring...")
-    start_time = time.time()
-
-    while time.time() - start_time < MONITOR_DURATION:
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    while True:
         ssid = get_ssid()
-        check_if_trusted()
+        bssid = get_bssid()
         gateway_ip = get_gateway_ip()
+        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        log_entry = f"[{timestamp}] SSID: {ssid}, Gateway: {gateway_ip}"
-        print(log_entry)
+        alert_triggered = check_if_trusted(ssid, bssid)
+        if alert_triggered:
+            log_entry = f"[{timestamp}] ALERT: SSID: {ssid}, BSSID: {bssid}, Gateway: {gateway_ip}"
+            with open(LOG_FILE, "a") as f:
+                f.write(log_entry + "\n")
+            print(log_entry)
+            send_email_alert(ssid, gateway_ip, timestamp, receiver_email)
 
-        with open(LOG_FILE, "a") as f:
-            f.write(log_entry + "\n")
-
-        send_email_alert(ssid, gateway_ip, timestamp, receiver_email)
-        time.sleep(10)
-
-    print("\nMonitoring stopped.")
+        time.sleep(MONITOR_INTERVAL)
 
 def trust_current_network():
     ssid = get_ssid()
-    gateway_ip = get_gateway_ip()
+    bssid = get_bssid()
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
     try:
-        result = subprocess.check_output("netsh wlan show interfaces", shell=True).decode()
-        bssid = "Unknown"
-        for line in result.splitlines():
-            if "BSSID" in line:
-                bssid = line.split(":")[1].strip()
-
         trusted = {}
-
         if os.path.exists("trusted_networks.json"):
             with open("trusted_networks.json", "r") as f:
                 trusted = json.load(f)
@@ -184,26 +177,26 @@ def main():
     print("\nWi-Fi Threat Detection Tool")
     receiver_email = input("Enter your email to receive threat alerts: ").strip()
 
+    monitor_thread = threading.Thread(target=background_monitor, args=(receiver_email,), daemon=True)
+    monitor_thread.start()
+
     while True:
         print("\nSelect an option:")
-        print("[1] Start Monitoring")
-        print("[2] Geolocate Gateway IP and View Map")
-        print("[3] View Logs")
+        print("[1] Geolocate Gateway IP and View Map")
+        print("[2] View Logs")
+        print("[3] Trust Current Network")
         print("[4] Exit")
-        print("[5] Trust Current Network")
         choice = input("Enter choice: ")
 
         if choice == "1":
-            start_monitoring(receiver_email)
-        elif choice == "2":
             geolocate_gateway()
-        elif choice == "3":
+        elif choice == "2":
             view_logs()
+        elif choice == "3":
+            trust_current_network()
         elif choice == "4":
             print("Exiting...")
             break
-        elif choice == "5":
-            trust_current_network()
         else:
             print("Invalid option.")
 
