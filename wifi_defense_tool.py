@@ -10,6 +10,7 @@ from email.mime.multipart import MIMEMultipart
 import subprocess
 import json
 import threading
+import psutil
 
 # === CONFIGURATION ===
 LOG_FILE = "network_log.txt"
@@ -20,16 +21,15 @@ SENDER_PASSWORD = "esugedhsjlukpqwm"
 
 # === FUNCTIONS ===
 
-def send_email_alert(ssid, gateway, timestamp, to_email):
-    subject = "Wi-Fi Threat Detected"
+def send_email_alert(subject, ip, timestamp, to_email):
     body = f"""
-    Suspicious Wi-Fi Activity Detected
+    Suspicious Activity Detected
 
     Timestamp: {timestamp}
-    SSID: {ssid}
-    Gateway IP: {gateway}
+    IP Address: {ip}
+    Detected Behavior: Port Scanning or Suspicious Access
     """
-
+    
     msg = MIMEMultipart()
     msg["From"] = SENDER_EMAIL
     msg["To"] = to_email
@@ -118,6 +118,10 @@ def background_monitor(receiver_email):
     print("\n[Background Monitoring Started]")
     last_bssid = get_bssid()
 
+    # Start monitoring network connections for port scanning
+    connection_monitor_thread = threading.Thread(target=monitor_connections, daemon=True)
+    connection_monitor_thread.start()
+
     while True:
         ssid = get_ssid()
         bssid = get_bssid()
@@ -172,6 +176,40 @@ def geolocate_gateway():
         generate_map(ip)
     else:
         print("Gateway IP not found.")
+
+# === Network Monitoring for Port Scanning ===
+SUSPICIOUS_THRESHOLD = 5  # Number of different ports accessed within a short time
+
+# Function to monitor network connections
+def monitor_connections():
+    connections = {}
+    while True:
+        # Get all active connections
+        for conn in psutil.net_connections(kind='inet'):
+            if conn.status == 'ESTABLISHED':  # Only consider established connections
+                ip = conn.raddr.ip  # Remote address IP
+                port = conn.raddr.port  # Remote address port
+
+                # Track the number of connections per IP
+                if ip not in connections:
+                    connections[ip] = []
+                connections[ip].append(port)
+
+        # Detect suspicious activity: too many ports accessed in a short time (port scanning)
+        for ip, ports in connections.items():
+            if len(set(ports)) >= SUSPICIOUS_THRESHOLD:  # Detect multiple different ports accessed
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_entry = f"[{timestamp}] Suspicious port scan detected from IP: {ip}, Ports: {ports}"
+                
+                # Log and alert
+                with open(LOG_FILE, "a") as f:
+                    f.write(log_entry + "\n")
+                print(log_entry)
+                
+                # Send alert email
+                send_email_alert("Suspicious Port Scan", ip, timestamp, "your_receiver_email@example.com")
+                
+        time.sleep(MONITOR_INTERVAL)  # Monitor every few seconds
 
 def main():
     print("\nWi-Fi Threat Detection Tool")
