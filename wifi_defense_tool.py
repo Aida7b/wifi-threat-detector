@@ -21,13 +21,14 @@ SENDER_PASSWORD = "esugedhsjlukpqwm"
 
 # === FUNCTIONS ===
 
-def send_email_alert(subject, ip, timestamp, to_email):
+def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip):
     body = f"""
     Suspicious Activity Detected
 
     Timestamp: {timestamp}
     IP Address: {ip}
-    Detected Behavior: Port Scanning or Suspicious Access
+    Attacker Public IP: {attacker_ip}
+    Detected Behavior: {message}
     """
     
     msg = MIMEMultipart()
@@ -46,6 +47,14 @@ def send_email_alert(subject, ip, timestamp, to_email):
         print(f"Failed to send email: {e}")
 
 def get_gateway_ip():
+    try:
+        ip = requests.get("https://api.ipify.org").text
+        return ip
+    except:
+        return "Unknown"
+
+def get_attacker_ip():
+    # This function detects the public IP of the attacker (using external IP detection service)
     try:
         ip = requests.get("https://api.ipify.org").text
         return ip
@@ -116,10 +125,9 @@ def check_if_trusted(ssid, bssid):
 
 def background_monitor(receiver_email):
     print("\n[Background Monitoring Started]")
-    last_bssid = get_bssid()
 
-    # Start monitoring network connections for port scanning
-    connection_monitor_thread = threading.Thread(target=monitor_connections, daemon=True)
+    # Start monitoring network connections for port scanning and suspicious activity
+    connection_monitor_thread = threading.Thread(target=monitor_connections, args=(receiver_email,), daemon=True)
     connection_monitor_thread.start()
 
     while True:
@@ -134,7 +142,9 @@ def background_monitor(receiver_email):
             with open(LOG_FILE, "a") as f:
                 f.write(log_entry + "\n")
             print(log_entry)
-            send_email_alert(ssid, gateway_ip, timestamp, receiver_email)
+
+            attacker_ip = get_attacker_ip()  # Get the attacker's public IP
+            send_email_alert(ssid, gateway_ip, timestamp, receiver_email, "Untrusted network detected.", attacker_ip)
 
         time.sleep(MONITOR_INTERVAL)
 
@@ -161,27 +171,41 @@ def trust_current_network():
     except Exception as e:
         print(f"Failed to trust current network: {e}")
 
-def view_logs():
-    print("\nLog contents:")
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            print(f.read())
+def view_trusted_networks():
+    if os.path.exists("trusted_networks.json"):
+        with open("trusted_networks.json", "r") as f:
+            trusted = json.load(f)
+            print("\nTrusted Networks List:")
+            for ssid, details in trusted.items():
+                print(f"SSID: {ssid}, BSSID: {details['bssid']}, Added on: {details['added_on']}")
     else:
-        print("No logs found.")
+        print("No trusted networks found.")
 
-def geolocate_gateway():
-    print("\nGeolocating Gateway IP...")
-    ip = get_gateway_ip()
-    if ip != "Unknown":
-        generate_map(ip)
-    else:
-        print("Gateway IP not found.")
+def delete_trusted_network():
+    ssid_to_delete = input("Enter SSID of network to delete: ").strip()
 
-# === Network Monitoring for Port Scanning ===
+    try:
+        if os.path.exists("trusted_networks.json"):
+            with open("trusted_networks.json", "r") as f:
+                trusted = json.load(f)
+
+            if ssid_to_delete in trusted:
+                del trusted[ssid_to_delete]
+                with open("trusted_networks.json", "w") as f:
+                    json.dump(trusted, f, indent=4)
+                print(f"Network {ssid_to_delete} deleted from trusted networks.")
+            else:
+                print(f"Network {ssid_to_delete} not found in trusted networks.")
+        else:
+            print("No trusted networks to delete.")
+    except Exception as e:
+        print(f"Error deleting trusted network: {e}")
+
+# === Network Monitoring for Suspicious Activity ===
 SUSPICIOUS_THRESHOLD = 5  # Number of different ports accessed within a short time
 
 # Function to monitor network connections
-def monitor_connections():
+def monitor_connections(receiver_email):
     connections = {}
     while True:
         # Get all active connections
@@ -195,11 +219,11 @@ def monitor_connections():
                     connections[ip] = []
                 connections[ip].append(port)
 
-        # Detect suspicious activity: too many ports accessed in a short time (port scanning)
+        # Detect suspicious activity: too many ports accessed in a short time (port scanning or DDoS)
         for ip, ports in connections.items():
             if len(set(ports)) >= SUSPICIOUS_THRESHOLD:  # Detect multiple different ports accessed
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                log_entry = f"[{timestamp}] Suspicious port scan detected from IP: {ip}, Ports: {ports}"
+                log_entry = f"[{timestamp}] Suspicious activity detected from IP: {ip}, Ports: {ports}"
                 
                 # Log and alert
                 with open(LOG_FILE, "a") as f:
@@ -207,7 +231,8 @@ def monitor_connections():
                 print(log_entry)
                 
                 # Send alert email
-                send_email_alert("Suspicious Port Scan", ip, timestamp, "your_receiver_email@example.com")
+                attacker_ip = get_attacker_ip()  # Get the attacker's public IP
+                send_email_alert("Suspicious Activity (Possible DDoS/Port Scan)", ip, timestamp, receiver_email, "Port scan or DDoS activity detected.", attacker_ip)
                 
         time.sleep(MONITOR_INTERVAL)  # Monitor every few seconds
 
@@ -220,16 +245,16 @@ def main():
 
     while True:
         print("\nSelect an option:")
-        print("[1] Geolocate Gateway IP and View Map")
-        print("[2] View Logs")
+        print("[1] View Trusted Networks")
+        print("[2] Delete Trusted Network")
         print("[3] Trust Current Network")
         print("[4] Exit")
         choice = input("Enter choice: ")
 
         if choice == "1":
-            geolocate_gateway()
+            view_trusted_networks()
         elif choice == "2":
-            view_logs()
+            delete_trusted_network()
         elif choice == "3":
             trust_current_network()
         elif choice == "4":
