@@ -126,24 +126,18 @@ def check_if_trusted(ssid, bssid):
 def background_monitor(receiver_email):
     print("\n[Background Monitoring Started]")
 
-    # Start monitoring network connections for port scanning and suspicious activity
-    connection_monitor_thread = threading.Thread(target=monitor_connections, args=(receiver_email,), daemon=True)
-    connection_monitor_thread.start()
-
     while True:
         ssid = get_ssid()
         bssid = get_bssid()
         gateway_ip = get_gateway_ip()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-        print(f"Connected to SSID: {ssid}, BSSID: {bssid}")  # Display current network
-
         alert_triggered = check_if_trusted(ssid, bssid)
         if alert_triggered:
             log_entry = f"[{timestamp}] ALERT: SSID: {ssid}, BSSID: {bssid}, Gateway: {gateway_ip}"
             with open(LOG_FILE, "a") as f:
                 f.write(log_entry + "\n")
-            print(log_entry)
+            print(log_entry)  # Log and show when an alert is triggered
 
             attacker_ip = get_attacker_ip()  # Get the attacker's public IP
             lat, lon, city = geolocate_ip(attacker_ip)  # Geolocation of the attacker's IP
@@ -212,7 +206,6 @@ def monitor_connections(receiver_email):
     connections = {}
     while True:
         for conn in psutil.net_connections(kind='inet'):
-            print(f"Detected connection: {conn.raddr.ip}:{conn.raddr.port}, Status: {conn.status}")  # Debugging print
             if conn.status == 'ESTABLISHED':  # Only consider established connections
                 ip = conn.raddr.ip  # Remote address IP (attacker's IP)
                 port = conn.raddr.port  # Remote address port
@@ -231,7 +224,7 @@ def monitor_connections(receiver_email):
                 # Log and alert
                 with open(LOG_FILE, "a") as f:
                     f.write(log_entry + "\n")
-                print(log_entry)  # Debugging print
+                print(log_entry)  # Log and show suspicious activity
                 
                 # Send alert email with the attacker's IP
                 attacker_ip = ip  # The attacker's public IP
@@ -243,6 +236,20 @@ def monitor_connections(receiver_email):
 def main():
     print("\nWi-Fi Threat Detection Tool")
     receiver_email = input("Enter your email to receive threat alerts: ").strip()
+
+    # Display logs and trusted networks as soon as the tool starts
+    print("\nDisplaying logs history...")
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            print(f.read())
+
+    print("\nDisplaying geolocation of attacker IP...")
+    attacker_ip = get_attacker_ip()
+    if attacker_ip != "Unknown":
+        generate_map(attacker_ip)
+    
+    print("\nDisplaying trusted networks...")
+    view_trusted_networks()
 
     monitor_thread = threading.Thread(target=background_monitor, args=(receiver_email,), daemon=True)
     monitor_thread.start()
