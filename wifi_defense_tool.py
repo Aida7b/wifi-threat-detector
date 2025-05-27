@@ -21,7 +21,7 @@ SENDER_PASSWORD = "esugedhsjlukpqwm"
 
 # === FUNCTIONS ===
 
-def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip):
+def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip, lat, lon, city):
     body = f"""
     Suspicious Activity Detected
 
@@ -29,6 +29,7 @@ def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip):
     IP Address: {ip}
     Attacker Public IP: {attacker_ip}
     Detected Behavior: {message}
+    Geolocation: {city} ({lat}, {lon})
     """
     
     msg = MIMEMultipart()
@@ -88,7 +89,7 @@ def geolocate_ip(ip):
             lat = res['lat']
             lon = res['lon']
             city = res.get('city', 'Unknown')
-            print(f"Gateway location: {city} ({lat}, {lon})")
+            print(f"Attacker location: {city} ({lat}, {lon})")
             return lat, lon, city
     except Exception as e:
         print(f"Geolocation error: {e}")
@@ -98,10 +99,10 @@ def generate_map(ip):
     lat, lon, city = geolocate_ip(ip)
     if lat and lon:
         m = folium.Map(location=[lat, lon], zoom_start=10)
-        folium.Marker([lat, lon], tooltip=f"Gateway IP: {ip}\nCity: {city}").add_to(m)
-        m.save("gateway_location_map.html")
-        print("Map saved as gateway_location_map.html")
-        webbrowser.open("gateway_location_map.html")
+        folium.Marker([lat, lon], tooltip=f"Attacker IP: {ip}\nCity: {city}").add_to(m)
+        m.save("attacker_location_map.html")
+        print("Map saved as attacker_location_map.html")
+        webbrowser.open("attacker_location_map.html")
     else:
         print("Map generation failed.")
 
@@ -144,7 +145,8 @@ def background_monitor(receiver_email):
             print(log_entry)
 
             attacker_ip = get_attacker_ip()  # Get the attacker's public IP
-            send_email_alert(ssid, gateway_ip, timestamp, receiver_email, "Untrusted network detected.", attacker_ip)
+            lat, lon, city = geolocate_ip(attacker_ip)  # Geolocation of the attacker's IP
+            send_email_alert(ssid, gateway_ip, timestamp, receiver_email, "Untrusted network detected.", attacker_ip, lat, lon, city)
 
         time.sleep(MONITOR_INTERVAL)
 
@@ -211,7 +213,7 @@ def monitor_connections(receiver_email):
         # Get all active connections
         for conn in psutil.net_connections(kind='inet'):
             if conn.status == 'ESTABLISHED':  # Only consider established connections
-                ip = conn.raddr.ip  # Remote address IP
+                ip = conn.raddr.ip  # Remote address IP (attacker's IP)
                 port = conn.raddr.port  # Remote address port
 
                 # Track the number of connections per IP
@@ -230,9 +232,10 @@ def monitor_connections(receiver_email):
                     f.write(log_entry + "\n")
                 print(log_entry)
                 
-                # Send alert email
-                attacker_ip = get_attacker_ip()  # Get the attacker's public IP
-                send_email_alert("Suspicious Activity (Possible DDoS/Port Scan)", ip, timestamp, receiver_email, "Port scan or DDoS activity detected.", attacker_ip)
+                # Send alert email with the attacker's IP
+                attacker_ip = ip  # The attacker's public IP
+                lat, lon, city = geolocate_ip(attacker_ip)  # Geolocation of the attacker's IP
+                send_email_alert("Suspicious Activity (Possible DDoS/Port Scan)", attacker_ip, timestamp, receiver_email, "Port scan or DDoS activity detected.", attacker_ip, lat, lon, city)
                 
         time.sleep(MONITOR_INTERVAL)  # Monitor every few seconds
 
