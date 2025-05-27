@@ -55,9 +55,8 @@ def get_gateway_ip():
         return "Unknown"
 
 def get_attacker_ip():
-    # This function detects the public IP of the attacker (using external IP detection service)
     try:
-        ip = requests.get("https://api.ipify.org").text
+        ip = requests.get("https://api.ipify.org").text  # This gets your public IP, not the attacker's
         return ip
     except:
         return "Unknown"
@@ -137,6 +136,8 @@ def background_monitor(receiver_email):
         gateway_ip = get_gateway_ip()
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
+        print(f"Connected to SSID: {ssid}, BSSID: {bssid}")  # Display current network
+
         alert_triggered = check_if_trusted(ssid, bssid)
         if alert_triggered:
             log_entry = f"[{timestamp}] ALERT: SSID: {ssid}, BSSID: {bssid}, Gateway: {gateway_ip}"
@@ -210,8 +211,8 @@ SUSPICIOUS_THRESHOLD = 5  # Number of different ports accessed within a short ti
 def monitor_connections(receiver_email):
     connections = {}
     while True:
-        # Get all active connections
         for conn in psutil.net_connections(kind='inet'):
+            print(f"Detected connection: {conn.raddr.ip}:{conn.raddr.port}, Status: {conn.status}")  # Debugging print
             if conn.status == 'ESTABLISHED':  # Only consider established connections
                 ip = conn.raddr.ip  # Remote address IP (attacker's IP)
                 port = conn.raddr.port  # Remote address port
@@ -230,7 +231,7 @@ def monitor_connections(receiver_email):
                 # Log and alert
                 with open(LOG_FILE, "a") as f:
                     f.write(log_entry + "\n")
-                print(log_entry)
+                print(log_entry)  # Debugging print
                 
                 # Send alert email with the attacker's IP
                 attacker_ip = ip  # The attacker's public IP
