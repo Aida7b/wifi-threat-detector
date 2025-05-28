@@ -2,37 +2,55 @@ import time
 import datetime
 import os
 import smtplib
-import folium
-import requests
-import webbrowser
-import subprocess
 import psutil
+import requests
+import folium
+import webbrowser
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 # === CONFIGURATION ===
-LOG_FILE = "network_log.txt"
-MONITOR_DURATION = 30  # seconds
+LOG_FILE = "port_attack_log.txt"
+MONITOR_DURATION = 60  # seconds
+CHECK_INTERVAL = 10    # seconds
 
-# Gmail account that sends the alert
 SENDER_EMAIL = "space.art0007@gmail.com"
 SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
-
-SUSPICIOUS_PORTS = [21, 22, 23, 25, 3389, 4444, 5555, 8080, 31337]
+SUSPICIOUS_PORTS = [22, 23, 3389, 4444, 5555, 8080, 31337]
 
 # === FUNCTIONS ===
 
-def send_email_alert(ssid, gateway, timestamp, to_email, extra_message=""):
-    subject = "Wi-Fi/Port Threat Detected"
+def geolocate_ip(ip):
+    try:
+        res = requests.get(f"http://ip-api.com/json/{ip}").json()
+        if res['status'] == 'success':
+            return res['lat'], res['lon'], res.get('city', 'Unknown')
+    except:
+        pass
+    return None, None, "Unknown"
+
+def generate_map(ip, filename="attacker_map.html"):
+    lat, lon, city = geolocate_ip(ip)
+    if lat and lon:
+        m = folium.Map(location=[lat, lon], zoom_start=10)
+        folium.Marker([lat, lon], tooltip=f"Attacker IP: {ip}\nCity: {city}").add_to(m)
+        m.save(filename)
+        print(f"🌍 Map saved as {filename}")
+        webbrowser.open(filename)
+        return filename
+    return None
+
+def send_email_alert(timestamp, port, attacker_ip, to_email, map_file=None):
+    subject = "Suspicious Port Activity Detected"
     body = f"""
-Suspicious Activity Detected
+⚠️ Suspicious Port Activity Detected
 
 Timestamp: {timestamp}
-SSID: {ssid}
-Gateway IP: {gateway}
+Port: {port}
+Remote IP: {attacker_ip}
 
-{extra_message}
-    """
+This may indicate a scanning, brute-force or unauthorized access attempt.
+"""
 
     msg = MIMEMultipart()
     msg["From"] = SENDER_EMAIL
@@ -45,120 +63,70 @@ Gateway IP: {gateway}
             server.starttls()
             server.login(SENDER_EMAIL, SENDER_PASSWORD)
             server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-        print(f"Email alert sent to {to_email}")
+        print(f"📧 Email alert sent to {to_email}")
     except Exception as e:
-        print(f"Failed to send email: {e}")
+        print(f"❌ Failed to send email: {e}")
 
-def get_gateway_ip():
-    try:
-        return requests.get("https://api.ipify.org").text
-    except:
-        return "Unknown"
-
-def get_ssid():
-    try:
-        result = subprocess.check_output("netsh wlan show interfaces", shell=True).decode()
-        for line in result.splitlines():
-            if "SSID" in line and "BSSID" not in line:
-                return line.split(":")[1].strip()
-    except:
-        return "Unknown"
-    return "Unknown"
-
-def geolocate_ip(ip):
-    try:
-        res = requests.get(f"http://ip-api.com/json/{ip}").json()
-        if res['status'] == 'success':
-            return res['lat'], res['lon'], res.get('city', 'Unknown')
-    except:
-        pass
-    return None, None, "Unknown"
-
-def generate_map(ip):
-    lat, lon, city = geolocate_ip(ip)
-    if lat and lon:
-        m = folium.Map(location=[lat, lon], zoom_start=10)
-        folium.Marker([lat, lon], tooltip=f"Gateway IP: {ip}\nCity: {city}").add_to(m)
-        m.save("gateway_location_map.html")
-        print("Map saved as gateway_location_map.html")
-        webbrowser.open("gateway_location_map.html")
-    else:
-        print("Map generation failed.")
-
-def detect_suspicious_ports():
-    suspicious_found = []
+def detect_port_attacks():
+    alerts = []
     for conn in psutil.net_connections(kind='inet'):
-        if conn.status == 'LISTEN' and conn.laddr.port in SUSPICIOUS_PORTS:
-            suspicious_found.append(conn.laddr.port)
-    return suspicious_found
+        if conn.status in ['LISTEN', 'ESTABLISHED'] and conn.laddr.port in SUSPICIOUS_PORTS:
+            remote_ip = conn.raddr.ip if conn.raddr else "Unknown"
+            alerts.append((conn.laddr.port, remote_ip))
+    return alerts
 
 def start_monitoring(receiver_email):
-    print("\nStarting network and port monitoring...")
+    print("\n🔍 Monitoring for suspicious port activity...")
     start_time = time.time()
 
     while time.time() - start_time < MONITOR_DURATION:
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        ssid = get_ssid()
-        gateway_ip = get_gateway_ip()
+        alerts = detect_port_attacks()
 
-        log_entry = f"[{timestamp}] SSID: {ssid}, Gateway: {gateway_ip}"
-        print(log_entry)
+        for port, attacker_ip in alerts:
+            log_entry = f"[{timestamp}] Suspicious on port {port}, remote IP: {attacker_ip}"
+            print(log_entry)
+            with open(LOG_FILE, "a") as f:
+                f.write(log_entry + "\n")
 
-        suspicious_ports = detect_suspicious_ports()
-        port_alert = ""
+            map_file = None
+            if attacker_ip != "Unknown":
+                map_file = generate_map(attacker_ip)
 
-        if suspicious_ports:
-            port_alert = f"Suspicious ports open: {', '.join(map(str, suspicious_ports))}"
-            log_entry += f", {port_alert}"
-            print(f"ALERT: {port_alert}")
+            send_email_alert(timestamp, port, attacker_ip, receiver_email, map_file)
 
-        with open(LOG_FILE, "a") as f:
-            f.write(log_entry + "\n")
+        time.sleep(CHECK_INTERVAL)
 
-        send_email_alert(ssid, gateway_ip, timestamp, receiver_email, port_alert)
-        time.sleep(10)
-
-    print("\nMonitoring stopped.")
+    print("\n✅ Monitoring finished.")
 
 def view_logs():
-    print("\nLog contents:")
+    print("\n📜 Port Attack Logs:")
     if os.path.exists(LOG_FILE):
         with open(LOG_FILE, "r") as f:
             print(f.read())
     else:
         print("No logs found.")
 
-def geolocate_gateway():
-    print("\nGeolocating Gateway IP...")
-    ip = get_gateway_ip()
-    if ip != "Unknown":
-        generate_map(ip)
-    else:
-        print("Gateway IP not found.")
-
 def main():
-    print("\nWi-Fi & Port Threat Detection Tool")
-    receiver_email = input("Enter your email to receive threat alerts: ").strip()
+    print("\n🚨 Suspicious Port Detection Tool")
+    receiver_email = input("Enter your email to receive alerts: ").strip()
 
     while True:
-        print("\nSelect an option:")
+        print("\nChoose an option:")
         print("[1] Start Monitoring")
-        print("[2] Geolocate Gateway IP and View Map")
-        print("[3] View Logs")
-        print("[4] Exit")
+        print("[2] View Logs")
+        print("[3] Exit")
         choice = input("Enter choice: ")
 
         if choice == "1":
             start_monitoring(receiver_email)
         elif choice == "2":
-            geolocate_gateway()
-        elif choice == "3":
             view_logs()
-        elif choice == "4":
+        elif choice == "3":
             print("Exiting...")
             break
         else:
-            print("Invalid option.")
+            print("Invalid choice.")
 
 if __name__ == "__main__":
     main()
