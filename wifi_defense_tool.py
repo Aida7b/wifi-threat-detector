@@ -5,32 +5,35 @@ import smtplib
 import folium
 import requests
 import webbrowser
+import subprocess
+import psutil
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import subprocess
-import json
-import threading
-import psutil
 
 # === CONFIGURATION ===
 LOG_FILE = "network_log.txt"
-MONITOR_INTERVAL = 10  # seconds
+MONITOR_DURATION = 30  # seconds
 
+# Gmail account that sends the alert
 SENDER_EMAIL = "space.art0007@gmail.com"
-SENDER_PASSWORD = "esugedhsjlukpqwm"
+SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
+
+SUSPICIOUS_PORTS = [21, 22, 23, 25, 3389, 4444, 5555, 8080, 31337]
 
 # === FUNCTIONS ===
 
-def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip):
+def send_email_alert(ssid, gateway, timestamp, to_email, extra_message=""):
+    subject = "Wi-Fi/Port Threat Detected"
     body = f"""
-    Suspicious Activity Detected
+Suspicious Activity Detected
 
-    Timestamp: {timestamp}
-    IP Address: {ip}
-    Attacker Public IP: {attacker_ip}
-    Detected Behavior: {message}
+Timestamp: {timestamp}
+SSID: {ssid}
+Gateway IP: {gateway}
+
+{extra_message}
     """
-    
+
     msg = MIMEMultipart()
     msg["From"] = SENDER_EMAIL
     msg["To"] = to_email
@@ -48,16 +51,7 @@ def send_email_alert(subject, ip, timestamp, to_email, message, attacker_ip):
 
 def get_gateway_ip():
     try:
-        ip = requests.get("https://api.ipify.org").text
-        return ip
-    except:
-        return "Unknown"
-
-def get_attacker_ip():
-    # This function detects the public IP of the attacker (using external IP detection service)
-    try:
-        ip = requests.get("https://api.ipify.org").text
-        return ip
+        return requests.get("https://api.ipify.org").text
     except:
         return "Unknown"
 
@@ -67,17 +61,7 @@ def get_ssid():
         for line in result.splitlines():
             if "SSID" in line and "BSSID" not in line:
                 return line.split(":")[1].strip()
-    except Exception:
-        return "Unknown"
-    return "Unknown"
-
-def get_bssid():
-    try:
-        result = subprocess.check_output("netsh wlan show interfaces", shell=True).decode()
-        for line in result.splitlines():
-            if "BSSID" in line:
-                return line.split(":")[1].strip()
-    except Exception:
+    except:
         return "Unknown"
     return "Unknown"
 
@@ -85,13 +69,9 @@ def geolocate_ip(ip):
     try:
         res = requests.get(f"http://ip-api.com/json/{ip}").json()
         if res['status'] == 'success':
-            lat = res['lat']
-            lon = res['lon']
-            city = res.get('city', 'Unknown')
-            print(f"Gateway location: {city} ({lat}, {lon})")
-            return lat, lon, city
-    except Exception as e:
-        print(f"Geolocation error: {e}")
+            return res['lat'], res['lon'], res.get('city', 'Unknown')
+    except:
+        pass
     return None, None, "Unknown"
 
 def generate_map(ip):
@@ -105,158 +85,75 @@ def generate_map(ip):
     else:
         print("Map generation failed.")
 
-def check_if_trusted(ssid, bssid):
-    if not os.path.exists("trusted_networks.json"):
-        return False
+def detect_suspicious_ports():
+    suspicious_found = []
+    for conn in psutil.net_connections(kind='inet'):
+        if conn.status == 'LISTEN' and conn.laddr.port in SUSPICIOUS_PORTS:
+            suspicious_found.append(conn.laddr.port)
+    return suspicious_found
 
-    with open("trusted_networks.json", "r") as f:
-        trusted = json.load(f)
+def start_monitoring(receiver_email):
+    print("\nStarting network and port monitoring...")
+    start_time = time.time()
 
-    if ssid in trusted:
-        expected_bssid = trusted[ssid]["bssid"]
-        if bssid != expected_bssid:
-            print(f"\nALERT: SSID '{ssid}' is trusted, but BSSID has changed!")
-            print(f"Expected BSSID: {expected_bssid}, Current BSSID: {bssid}")
-            return True
-    else:
-        print(f"\n'{ssid}' is not in your trusted network list.")
-        return True
-    return False
-
-def background_monitor(receiver_email):
-    print("\n[Background Monitoring Started]")
-
-    # Start monitoring network connections for port scanning and suspicious activity
-    connection_monitor_thread = threading.Thread(target=monitor_connections, args=(receiver_email,), daemon=True)
-    connection_monitor_thread.start()
-
-    while True:
-        ssid = get_ssid()
-        bssid = get_bssid()
-        gateway_ip = get_gateway_ip()
+    while time.time() - start_time < MONITOR_DURATION:
         timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        ssid = get_ssid()
+        gateway_ip = get_gateway_ip()
 
-        alert_triggered = check_if_trusted(ssid, bssid)
-        if alert_triggered:
-            log_entry = f"[{timestamp}] ALERT: SSID: {ssid}, BSSID: {bssid}, Gateway: {gateway_ip}"
-            with open(LOG_FILE, "a") as f:
-                f.write(log_entry + "\n")
-            print(log_entry)
+        log_entry = f"[{timestamp}] SSID: {ssid}, Gateway: {gateway_ip}"
+        print(log_entry)
 
-            attacker_ip = get_attacker_ip()  # Get the attacker's public IP
-            send_email_alert(ssid, gateway_ip, timestamp, receiver_email, "Untrusted network detected.", attacker_ip)
+        suspicious_ports = detect_suspicious_ports()
+        port_alert = ""
 
-        time.sleep(MONITOR_INTERVAL)
+        if suspicious_ports:
+            port_alert = f"Suspicious ports open: {', '.join(map(str, suspicious_ports))}"
+            log_entry += f", {port_alert}"
+            print(f"ALERT: {port_alert}")
 
-def trust_current_network():
-    ssid = get_ssid()
-    bssid = get_bssid()
-    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        with open(LOG_FILE, "a") as f:
+            f.write(log_entry + "\n")
 
-    try:
-        trusted = {}
-        if os.path.exists("trusted_networks.json"):
-            with open("trusted_networks.json", "r") as f:
-                trusted = json.load(f)
+        send_email_alert(ssid, gateway_ip, timestamp, receiver_email, port_alert)
+        time.sleep(10)
 
-        trusted[ssid] = {
-            "bssid": bssid,
-            "added_on": timestamp
-        }
+    print("\nMonitoring stopped.")
 
-        with open("trusted_networks.json", "w") as f:
-            json.dump(trusted, f, indent=4)
-
-        print(f"\nTrusted network saved: {ssid} -> {bssid}")
-    except Exception as e:
-        print(f"Failed to trust current network: {e}")
-
-def view_trusted_networks():
-    if os.path.exists("trusted_networks.json"):
-        with open("trusted_networks.json", "r") as f:
-            trusted = json.load(f)
-            print("\nTrusted Networks List:")
-            for ssid, details in trusted.items():
-                print(f"SSID: {ssid}, BSSID: {details['bssid']}, Added on: {details['added_on']}")
+def view_logs():
+    print("\nLog contents:")
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            print(f.read())
     else:
-        print("No trusted networks found.")
+        print("No logs found.")
 
-def delete_trusted_network():
-    ssid_to_delete = input("Enter SSID of network to delete: ").strip()
-
-    try:
-        if os.path.exists("trusted_networks.json"):
-            with open("trusted_networks.json", "r") as f:
-                trusted = json.load(f)
-
-            if ssid_to_delete in trusted:
-                del trusted[ssid_to_delete]
-                with open("trusted_networks.json", "w") as f:
-                    json.dump(trusted, f, indent=4)
-                print(f"Network {ssid_to_delete} deleted from trusted networks.")
-            else:
-                print(f"Network {ssid_to_delete} not found in trusted networks.")
-        else:
-            print("No trusted networks to delete.")
-    except Exception as e:
-        print(f"Error deleting trusted network: {e}")
-
-# === Network Monitoring for Suspicious Activity ===
-SUSPICIOUS_THRESHOLD = 5  # Number of different ports accessed within a short time
-
-# Function to monitor network connections
-def monitor_connections(receiver_email):
-    connections = {}
-    while True:
-        # Get all active connections
-        for conn in psutil.net_connections(kind='inet'):
-            if conn.status == 'ESTABLISHED':  # Only consider established connections
-                ip = conn.raddr.ip  # Remote address IP
-                port = conn.raddr.port  # Remote address port
-
-                # Track the number of connections per IP
-                if ip not in connections:
-                    connections[ip] = []
-                connections[ip].append(port)
-
-        # Detect suspicious activity: too many ports accessed in a short time (port scanning or DDoS)
-        for ip, ports in connections.items():
-            if len(set(ports)) >= SUSPICIOUS_THRESHOLD:  # Detect multiple different ports accessed
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                log_entry = f"[{timestamp}] Suspicious activity detected from IP: {ip}, Ports: {ports}"
-                
-                # Log and alert
-                with open(LOG_FILE, "a") as f:
-                    f.write(log_entry + "\n")
-                print(log_entry)
-                
-                # Send alert email
-                attacker_ip = get_attacker_ip()  # Get the attacker's public IP
-                send_email_alert("Suspicious Activity (Possible DDoS/Port Scan)", ip, timestamp, receiver_email, "Port scan or DDoS activity detected.", attacker_ip)
-                
-        time.sleep(MONITOR_INTERVAL)  # Monitor every few seconds
+def geolocate_gateway():
+    print("\nGeolocating Gateway IP...")
+    ip = get_gateway_ip()
+    if ip != "Unknown":
+        generate_map(ip)
+    else:
+        print("Gateway IP not found.")
 
 def main():
-    print("\nWi-Fi Threat Detection Tool")
+    print("\nWi-Fi & Port Threat Detection Tool")
     receiver_email = input("Enter your email to receive threat alerts: ").strip()
-
-    monitor_thread = threading.Thread(target=background_monitor, args=(receiver_email,), daemon=True)
-    monitor_thread.start()
 
     while True:
         print("\nSelect an option:")
-        print("[1] View Trusted Networks")
-        print("[2] Delete Trusted Network")
-        print("[3] Trust Current Network")
+        print("[1] Start Monitoring")
+        print("[2] Geolocate Gateway IP and View Map")
+        print("[3] View Logs")
         print("[4] Exit")
         choice = input("Enter choice: ")
 
         if choice == "1":
-            view_trusted_networks()
+            start_monitoring(receiver_email)
         elif choice == "2":
-            delete_trusted_network()
+            geolocate_gateway()
         elif choice == "3":
-            trust_current_network()
+            view_logs()
         elif choice == "4":
             print("Exiting...")
             break
