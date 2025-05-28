@@ -11,8 +11,7 @@ from email.mime.multipart import MIMEMultipart
 
 # === CONFIGURATION ===
 LOG_FILE = "port_attack_log.txt"
-MONITOR_DURATION = 60  # seconds
-CHECK_INTERVAL = 10    # seconds
+CHECK_INTERVAL = 10  # seconds
 
 SENDER_EMAIL = "space.art0007@gmail.com"
 SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
@@ -76,28 +75,35 @@ def detect_port_attacks():
     return alerts
 
 def start_monitoring(receiver_email):
-    print("\n🔍 Monitoring for suspicious port activity...")
-    start_time = time.time()
+    print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
+    seen_alerts = set()
 
-    while time.time() - start_time < MONITOR_DURATION:
-        timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        alerts = detect_port_attacks()
+    try:
+        while True:
+            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            alerts = detect_port_attacks()
 
-        for port, attacker_ip in alerts:
-            log_entry = f"[{timestamp}] Suspicious on port {port}, remote IP: {attacker_ip}"
-            print(log_entry)
-            with open(LOG_FILE, "a") as f:
-                f.write(log_entry + "\n")
+            for port, attacker_ip in alerts:
+                alert_key = f"{port}-{attacker_ip}"
+                if alert_key in seen_alerts:
+                    continue  # Skip already alerted ones in current session
+                seen_alerts.add(alert_key)
 
-            map_file = None
-            if attacker_ip != "Unknown":
-                map_file = generate_map(attacker_ip)
+                log_entry = f"[{timestamp}] Suspicious on port {port}, remote IP: {attacker_ip}"
+                print(log_entry)
+                with open(LOG_FILE, "a") as f:
+                    f.write(log_entry + "\n")
 
-            send_email_alert(timestamp, port, attacker_ip, receiver_email, map_file)
+                map_file = None
+                if attacker_ip != "Unknown":
+                    map_file = generate_map(attacker_ip)
 
-        time.sleep(CHECK_INTERVAL)
+                send_email_alert(timestamp, port, attacker_ip, receiver_email, map_file)
 
-    print("\n✅ Monitoring finished.")
+            time.sleep(CHECK_INTERVAL)
+
+    except KeyboardInterrupt:
+        print("\n🛑 Monitoring stopped by user.")
 
 def view_logs():
     print("\n📜 Port Attack Logs:")
@@ -113,7 +119,7 @@ def main():
 
     while True:
         print("\nChoose an option:")
-        print("[1] Start Monitoring")
+        print("[1] Start Monitoring (infinite)")
         print("[2] View Logs")
         print("[3] Exit")
         choice = input("Enter choice: ")
