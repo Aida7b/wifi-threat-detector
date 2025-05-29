@@ -6,16 +6,18 @@ import psutil
 import requests
 import folium
 import webbrowser
+import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from scapy.all import sniff, IP, TCP
 
 # === CONFIGURATION ===
 LOG_FILE = "port_attack_log.txt"
 CHECK_INTERVAL = 10  # seconds
-
 SENDER_EMAIL = "space.art0007@gmail.com"
 SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
 SUSPICIOUS_PORTS = [22, 23, 3389, 4444, 5555, 8080, 31337]
+seen_sniffed_ips = set()
 
 # === FUNCTIONS ===
 
@@ -74,9 +76,33 @@ def detect_port_attacks():
             alerts.append((conn.laddr.port, remote_ip))
     return alerts
 
+def packet_sniffer(receiver_email):
+    def process_packet(pkt):
+        if pkt.haslayer(IP) and pkt.haslayer(TCP):
+            dport = pkt[TCP].dport
+            if dport in SUSPICIOUS_PORTS:
+                src_ip = pkt[IP].src
+                alert_key = f"{dport}-{src_ip}"
+                if alert_key not in seen_sniffed_ips:
+                    seen_sniffed_ips.add(alert_key)
+                    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log_entry = f"[{timestamp}] Incoming packet to port {dport} from IP: {src_ip}"
+                    print(log_entry)
+                    with open(LOG_FILE, "a") as f:
+                        f.write(log_entry + "\n")
+
+                    map_file = generate_map(src_ip)
+                    send_email_alert(timestamp, dport, src_ip, receiver_email, map_file)
+
+    print("📡 Starting packet sniffing...")
+    sniff(filter="tcp", prn=process_packet, store=0)
+
 def start_monitoring(receiver_email):
     print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
     seen_alerts = set()
+
+    # Start background sniffing thread
+    threading.Thread(target=packet_sniffer, args=(receiver_email,), daemon=True).start()
 
     try:
         while True:
@@ -86,7 +112,7 @@ def start_monitoring(receiver_email):
             for port, attacker_ip in alerts:
                 alert_key = f"{port}-{attacker_ip}"
                 if alert_key in seen_alerts:
-                    continue  # Skip already alerted ones in current session
+                    continue
                 seen_alerts.add(alert_key)
 
                 log_entry = f"[{timestamp}] Suspicious on port {port}, remote IP: {attacker_ip}"
