@@ -8,7 +8,7 @@ import webbrowser
 import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from scapy.all import sniff, IP, TCP, get_if_list, conf
+from scapy.all import sniff, IP, TCP, conf
 
 # === CONFIGURATION ===
 LOG_FILE = "port_attack_log.txt"
@@ -23,7 +23,7 @@ seen_sniffed_ips = set()
 
 def get_current_network_info():
     ssid = "Unknown"
-    gateway = " "  # Start empty to avoid split error
+    gateway = " "
     try:
         ssid_data = os.popen("netsh wlan show interfaces").read()
         for line in ssid_data.splitlines():
@@ -124,23 +124,13 @@ def packet_sniffer(receiver_email, selected_iface):
                     map_file = generate_map(src_ip)
                     send_email_alert(timestamp, dport, src_ip, receiver_email, map_file)
 
-    print(f"\n📡 Starting packet sniffing on: {selected_iface}")
+    print(f"\n📡 Automatically sniffing on interface: {selected_iface}")
     sniff(filter="tcp", iface=selected_iface, prn=process_packet, store=0)
 
 def start_monitoring(receiver_email):
     print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
-    
-    interfaces = get_if_list()
-    print("Available interfaces:")
-    for idx, iface in enumerate(interfaces):
-        print(f"[{idx}] {iface}")
-
-    try:
-        choice = int(input("👉 Select interface to sniff on (e.g., 0, 1, 2...): "))
-        selected_iface = interfaces[choice]
-    except:
-        print("⚠️ Invalid choice. Using default interface.")
-        selected_iface = conf.iface
+    selected_iface = conf.iface
+    print(f"📡 Automatically selected interface: {selected_iface}")
 
     sniff_thread = threading.Thread(target=packet_sniffer, args=(receiver_email, selected_iface), daemon=True)
     sniff_thread.start()
