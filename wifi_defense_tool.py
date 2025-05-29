@@ -8,7 +8,7 @@ import webbrowser
 import threading
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from scapy.all import sniff, IP, TCP
+from scapy.all import sniff, IP, TCP, get_if_list, conf
 
 # === CONFIGURATION ===
 LOG_FILE = "port_attack_log.txt"
@@ -23,7 +23,7 @@ seen_sniffed_ips = set()
 
 def get_current_network_info():
     ssid = "Unknown"
-    gateway = "Unknown"
+    gateway = " "  # Start empty to avoid split error
     try:
         ssid_data = os.popen("netsh wlan show interfaces").read()
         for line in ssid_data.splitlines():
@@ -87,7 +87,7 @@ Timestamp: {timestamp}
 Port: {port}
 Remote IP: {attacker_ip}
 
-This may indicate a scanning, brute-force or unauthorized access attempt.
+This may indicate a scanning, brute-force, or DDoS-style flood.
 """
     msg = MIMEMultipart()
     msg["From"] = SENDER_EMAIL
@@ -106,29 +106,45 @@ This may indicate a scanning, brute-force or unauthorized access attempt.
 
 # === MONITORING ===
 
-def packet_sniffer(receiver_email):
+def packet_sniffer(receiver_email, selected_iface):
     def process_packet(pkt):
         if pkt.haslayer(IP) and pkt.haslayer(TCP):
             dport = pkt[TCP].dport
             if dport in SUSPICIOUS_PORTS:
                 src_ip = pkt[IP].src
+                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                log_entry = f"[{timestamp}] Incoming packet to port {dport} from IP: {src_ip}"
+                print(log_entry)
+                with open(LOG_FILE, "a") as f:
+                    f.write(log_entry + "\n")
+
                 alert_key = f"{dport}-{src_ip}"
                 if alert_key not in seen_sniffed_ips:
                     seen_sniffed_ips.add(alert_key)
-                    timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                    log_entry = f"[{timestamp}] Incoming packet to port {dport} from IP: {src_ip}"
-                    print(log_entry)
-                    with open(LOG_FILE, "a") as f:
-                        f.write(log_entry + "\n")
                     map_file = generate_map(src_ip)
                     send_email_alert(timestamp, dport, src_ip, receiver_email, map_file)
 
-    print("📡 Starting packet sniffing...")
-    sniff(filter="tcp", prn=process_packet, store=0)
+    print(f"\n📡 Starting packet sniffing on: {selected_iface}")
+    sniff(filter="tcp", iface=selected_iface, prn=process_packet, store=0)
 
 def start_monitoring(receiver_email):
     print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
-    threading.Thread(target=packet_sniffer, args=(receiver_email,), daemon=True).start()
+    
+    interfaces = get_if_list()
+    print("Available interfaces:")
+    for idx, iface in enumerate(interfaces):
+        print(f"[{idx}] {iface}")
+
+    try:
+        choice = int(input("👉 Select interface to sniff on (e.g., 0, 1, 2...): "))
+        selected_iface = interfaces[choice]
+    except:
+        print("⚠️ Invalid choice. Using default interface.")
+        selected_iface = conf.iface
+
+    sniff_thread = threading.Thread(target=packet_sniffer, args=(receiver_email, selected_iface), daemon=True)
+    sniff_thread.start()
+
     try:
         while True:
             time.sleep(CHECK_INTERVAL)
