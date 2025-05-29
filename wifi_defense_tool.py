@@ -1,198 +1,251 @@
-import time
-import datetime
-import os
-import smtplib
-import requests
-import folium
-import webbrowser
-import threading
+"""
+UNIVERSAL SUSPICIOUS-PORT DETECTION TOOL
+––––––––––––––––––––––––––––––––––––––––
+ • Works behind any brand of router / firewall.
+ • Keeps your original packet-sniffer (good for labs) **and**
+   adds three universal intakes that recover the real public
+   attacker IP even when the edge device does SNAT:
+
+     1.  Syslog traffic logs        (UDP/514)
+     2.  NetFlow v5 collector       (UDP/2055)   ← toggle if you need it
+     3.  REST / JSON log poller     (FortiGate, Palo Alto, Sophos, …)
+
+ • Once an attacker IP is seen by *any* intake, the
+   code geolocates it, saves a Folium map, e-mails you,
+   and writes to `port_attack_log.txt`—exactly like before.
+
+Edit only the CONFIGURATION section to fit your environment.
+"""
+
+# ======  STANDARD LIBS  ======
+import os, time, datetime, threading, socket, struct, re, json, select
+import smtplib, requests, folium, webbrowser
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+# ======  OPTIONAL: SCAPY LOCAL SNIFFER  ======
 from scapy.all import sniff, IP, TCP, conf
 
-# === CONFIGURATION ===
-LOG_FILE = "port_attack_log.txt"
-CHECK_INTERVAL = 10  # seconds
-TRUSTED_FILE = "trusted_network.txt"
-SENDER_EMAIL = "space.art0007@gmail.com"
-SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
-SUSPICIOUS_PORTS = [22, 23, 3389, 4444, 5555, 8080, 31337]
-seen_sniffed_ips = set()
+# ---------------------------------------------------------------------------
+#                               CONFIGURATION
+# ---------------------------------------------------------------------------
+LOG_FILE            = "port_attack_log.txt"
+TRUSTED_FILE        = "trusted_network.txt"
+CHECK_INTERVAL      = 10          # seconds between UI refreshes
+SUSPICIOUS_PORTS    = {22, 23, 3389, 4444, 5555, 8080, 31337}
 
-# === TRUSTED NETWORK LOGIC ===
+# -- Alerts ------------------------------------------------------------------
+SENDER_EMAIL        = "your_gmail@gmail.com"
+SENDER_PASSWORD     = "xxxxxx"                # Gmail “App Password”
+GEOLocate_API       = "http://ip-api.com/json/"  # free, no key needed
 
-def get_current_network_info():
-    ssid = "Unknown"
-    gateway = " "
+# -- Universal Intake --------------------------------------------------------
+LISTEN_IP           = "0.0.0.0"
+SYSLOG_PORT         = 514         # works for every firewall that can log
+ENABLE_NETFLOW      = False
+NETFLOW_PORT        = 2055        # set True + this port if you use NetFlow
+
+# REST pollers (leave empty if you rely on syslog/NetFlow)
+POLL_INTERVAL       = 8           # seconds
+VENDOR_REST = [
+    # Example FortiGate; copy-paste & adjust for other vendors
+    dict(
+        name      = "FortiGate",
+        url       = "https://192.0.2.1/api/v2/monitor/log/firewall",
+        token     = "READ_ONLY_API_TOKEN",
+        verify_ssl= False,
+        src_key   = "srcip",
+        port_key  = "dst_port",
+        time_key  = "time"
+    )
+]
+
+# ---------------------------------------------------------------------------
+#                         TRUSTED NETWORK HELPERS
+# ---------------------------------------------------------------------------
+def _get_current_network_info():
+    ssid, gateway = "Unknown", " "
     try:
-        ssid_data = os.popen("netsh wlan show interfaces").read()
-        for line in ssid_data.splitlines():
-            if "SSID" in line and "BSSID" not in line:
-                ssid = line.split(":")[1].strip()
-                break
-
-        ipconfig_data = os.popen("ipconfig").read()
-        for line in ipconfig_data.splitlines():
-            if "Default Gateway" in line:
-                gateway = line.split(":")[1].strip()
-                break
-    except:
-        pass
+        out = os.popen("netsh wlan show interfaces").read()
+        for ln in out.splitlines():
+            if "SSID" in ln and "BSSID" not in ln:
+                ssid = ln.split(":", 1)[1].strip(); break
+        out = os.popen("ipconfig").read()
+        for ln in out.splitlines():
+            if "Default Gateway" in ln:
+                gateway = ln.split(":", 1)[1].strip(); break
+    except: pass
     return ssid, gateway
 
 def save_current_as_trusted():
-    ssid, gateway = get_current_network_info()
-    with open(TRUSTED_FILE, "w") as f:
-        f.write(f"{ssid}|{gateway}")
-    print(f"✅ Trusted network saved: SSID = {ssid}, Gateway = {gateway}")
+    ssid, gw = _get_current_network_info()
+    with open(TRUSTED_FILE, "w") as f: f.write(f"{ssid}|{gw}")
+    print(f"✅ Trusted saved → SSID: {ssid}  GW: {gw}")
 
-def is_trusted_network():
-    if not os.path.exists(TRUSTED_FILE):
-        return False
+def _is_trusted():
+    if not os.path.exists(TRUSTED_FILE): return False
     try:
-        trusted_ssid, trusted_gateway = open(TRUSTED_FILE).read().strip().split("|")
-        current_ssid, current_gateway = get_current_network_info()
-        return current_ssid == trusted_ssid and current_gateway == trusted_gateway
-    except:
-        return False
+        t_ssid, t_gw = open(TRUSTED_FILE).read().split("|")
+        c_ssid, c_gw = _get_current_network_info()
+        return t_ssid == c_ssid and t_gw == c_gw
+    except: return False
 
-# === ALERT + GEO ===
-
-def geolocate_ip(ip):
+# ---------------------------------------------------------------------------
+#                           ALERT + GEOLOCATION
+# ---------------------------------------------------------------------------
+def _geolocate(ip):
     try:
-        res = requests.get(f"http://ip-api.com/json/{ip}").json()
-        if res['status'] == 'success':
-            return res['lat'], res['lon'], res.get('city', 'Unknown')
-    except:
-        pass
+        r = requests.get(GEOLocate_API + ip, timeout=5).json()
+        if r["status"] == "success":
+            return r["lat"], r["lon"], r.get("city","")
+    except: pass
     return None, None, "Unknown"
 
-def generate_map(ip, filename="attacker_map.html"):
-    lat, lon, city = geolocate_ip(ip)
-    if lat and lon:
-        m = folium.Map(location=[lat, lon], zoom_start=10)
-        folium.Marker([lat, lon], tooltip=f"Attacker IP: {ip}\nCity: {city}").add_to(m)
-        m.save(filename)
-        print(f"🌍 Map saved as {filename}")
-        webbrowser.open(filename)
-        return filename
-    return None
+def _make_map(ip):
+    lat, lon, city = _geolocate(ip)
+    if not lat: return None
+    m = folium.Map(location=[lat,lon], zoom_start=10)
+    folium.Marker([lat,lon], tooltip=f"{ip} – {city}").add_to(m)
+    fname = f"map_{ip.replace('.','_')}.html"
+    m.save(fname); webbrowser.open(fname)
+    return fname
 
-def send_email_alert(timestamp, port, attacker_ip, to_email, map_file=None):
-    subject = "Suspicious Port Activity Detected"
-    body = f"""
-⚠️ Suspicious Port Activity Detected
+def _send_mail(ts, port, ip, to, mfile=None):
+    body = f"""⚠ Suspicious port activity
 
-Timestamp: {timestamp}
-Port: {port}
-Remote IP: {attacker_ip}
-
-This may indicate a scanning, brute-force, or DDoS-style flood.
+Time   : {ts}
+Port   : {port}
+Source : {ip}
 """
-    msg = MIMEMultipart()
-    msg["From"] = SENDER_EMAIL
-    msg["To"] = to_email
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
+    msg = MIMEMultipart(); msg["From"]=SENDER_EMAIL; msg["To"]=to
+    msg["Subject"]="Suspicious Port Activity Detected"
+    msg.attach(MIMEText(body,"plain"))
     try:
-        with smtplib.SMTP("smtp.gmail.com", 587) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-        print(f"📧 Email alert sent to {to_email}")
+        with smtplib.SMTP("smtp.gmail.com",587) as s:
+            s.starttls(); s.login(SENDER_EMAIL,SENDER_PASSWORD)
+            s.send_message(msg)
+        print(f"📧 Alert sent → {to}")
     except Exception as e:
-        print(f"❌ Failed to send email: {e}")
+        print("Email error:",e)
 
-# === MONITORING ===
+# ---------------------------------------------------------------------------
+#                         UNIVERSAL INTAKE MODULE
+# ---------------------------------------------------------------------------
+_seen     = set()        # avoid duplicate alerts across intakes
 
-def packet_sniffer(receiver_email, selected_iface):
-    def process_packet(pkt):
+# 1. Syslog ------------------------------------------------------------------
+_sys_re = re.compile(r'(?P<ip>\d{1,3}(?:\.\d{1,3}){3}).*dstport=(?P<port>\d{1,5})')
+def _syslog_listener(cb):
+    sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+    sock.bind((LISTEN_IP,SYSLOG_PORT))
+    while True:
+        data,_=sock.recvfrom(4096)
+        m=_sys_re.search(data.decode(errors="ignore"))
+        if m:
+            port=int(m['port'])
+            if port in SUSPICIOUS_PORTS:
+                cb(m['ip'],port,time.time())
+
+# 2. NetFlow v5 (light) ------------------------------------------------------
+def _parse_v5(pkt, cb):
+    cnt=struct.unpack('!H',pkt[2:4])[0]; base=24
+    for _ in range(cnt):
+        rec=struct.unpack('!IIIHHBBBBHH',pkt[base:base+24])
+        src='. '.join(map(str,rec[0].to_bytes(4,'big')))
+        dst_port=rec[4]; proto=rec[6]
+        if proto==6 and dst_port in SUSPICIOUS_PORTS:
+            cb(src,dst_port,time.time())
+        base+=24
+
+def _netflow_listener(cb):
+    sock=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+    sock.bind((LISTEN_IP,NETFLOW_PORT))
+    while True:
+        pkt,_=sock.recvfrom(8192)
+        if len(pkt)>=24 and struct.unpack('!H',pkt[:2])[0]==5:
+            _parse_v5(pkt,cb)
+
+# 3. REST pollers ------------------------------------------------------------
+def _rest_poller(cfg, cb):
+    seen=set(); head={"Authorization":f"Bearer {cfg['token']}"}
+    while True:
+        try:
+            r=requests.get(cfg['url'],headers=head,
+                           verify=cfg.get('verify_ssl',True),timeout=5)
+            for e in r.json().get("data",[]):
+                ip=e[cfg['src_key']]; port=int(e[cfg['port_key']])
+                ts=e[cfg['time_key']]
+                key=(ip,port,ts)
+                if key in seen or port not in SUSPICIOUS_PORTS: continue
+                seen.add(key)
+                cb(ip,port,time.time())
+        except Exception as exc:
+            print(f"[REST {cfg['name']}] error:",exc)
+        time.sleep(POLL_INTERVAL)
+
+# Shared callback ------------------------------------------------------------
+def _handle_detection(ip, port, ts, receiver):
+    key=f"{ip}:{port}"
+    if key in _seen: return
+    _seen.add(key)
+    timestr=datetime.datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+    log=f"[{timestr}] Port {port} hit from {ip}"
+    print(log); open(LOG_FILE,"a").write(log+"\n")
+    mapf=_make_map(ip)
+    _send_mail(timestr,port,ip,receiver,mapf)
+
+def start_universal_intake(receiver_email):
+    cb=lambda ip,port,ts:_handle_detection(ip,port,ts,receiver_email)
+    threading.Thread(target=_syslog_listener,args=(cb,),daemon=True).start()
+    if ENABLE_NETFLOW:
+        threading.Thread(target=_netflow_listener,args=(cb,),daemon=True).start()
+    for cfg in VENDOR_REST:
+        threading.Thread(target=_rest_poller,args=(cfg,cb),daemon=True).start()
+    print("🌐 Universal intake running (syslog", 
+          "+ netflow" if ENABLE_NETFLOW else "", 
+          "+ REST x",len(VENDOR_REST),")")
+
+# ---------------------------------------------------------------------------
+#                     OPTIONAL LOCAL PACKET SNIFFER
+# ---------------------------------------------------------------------------
+def _sniff_local(receiver):
+    iface=conf.iface
+    print("📡 Local sniff on",iface)
+    def _proc(pkt):
         if pkt.haslayer(IP) and pkt.haslayer(TCP):
-            dport = pkt[TCP].dport
+            dport=pkt[TCP].dport
             if dport in SUSPICIOUS_PORTS:
-                src_ip = pkt[IP].src
-                timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                ip=pkt[IP].src
+                _handle_detection(ip,dport,time.time(),receiver)
+    sniff(filter="tcp",iface=iface,prn=_proc,store=0)
 
-                # NAT detection logic + public IP fallback for map
-                if src_ip == "192.168.1.1":
-                    try:
-                        real_ip = requests.get("https://api.ipify.org").text.strip()
-                        src_ip_note = f"{src_ip} (NAT gateway) — possible public attacker IP: {real_ip}"
-                        map_target_ip = real_ip
-                    except:
-                        src_ip_note = f"{src_ip} (NAT gateway)"
-                        map_target_ip = src_ip
-                else:
-                    src_ip_note = src_ip
-                    map_target_ip = src_ip
-
-                log_entry = f"[{timestamp}] Incoming packet to port {dport} from IP: {src_ip_note}"
-                print(log_entry)
-                with open(LOG_FILE, "a") as f:
-                    f.write(log_entry + "\n")
-
-                alert_key = f"{dport}-{src_ip}"
-                if alert_key not in seen_sniffed_ips:
-                    seen_sniffed_ips.add(alert_key)
-                    map_file = generate_map(map_target_ip)
-                    send_email_alert(timestamp, dport, src_ip_note, receiver_email, map_file)
-
-    print(f"\n📡 Automatically sniffing on interface: {selected_iface}")
-    sniff(filter="tcp", iface=selected_iface, prn=process_packet, store=0)
-
-def start_monitoring(receiver_email):
-    print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
-    selected_iface = conf.iface
-    print(f"📡 Automatically selected interface: {selected_iface}")
-
-    sniff_thread = threading.Thread(target=packet_sniffer, args=(receiver_email, selected_iface), daemon=True)
-    sniff_thread.start()
-
-    try:
-        while True:
-            time.sleep(CHECK_INTERVAL)
-    except KeyboardInterrupt:
-        print("\n🛑 Monitoring stopped by user.")
-
-# === LOG VIEW ===
-
-def view_logs():
-    print("\n📜 Port Attack Logs:")
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            print(f.read())
-    else:
-        print("No logs found.")
-
-# === MAIN MENU ===
+# ---------------------------------------------------------------------------
+#                                UI
+# ---------------------------------------------------------------------------
+def _view_logs():
+    if not os.path.exists(LOG_FILE):
+        print("No logs yet."); return
+    print("\n".join(open(LOG_FILE).read().splitlines()[-40:]))
 
 def main():
-    print("\n🚨 Suspicious Port Detection Tool")
-    receiver_email = input("Enter your email to receive alerts: ").strip()
-
+    print("\n🚨 Universal Suspicious-Port Detector")
+    recv=input("📧 Your e-mail for alerts: ").strip()
     while True:
-        print("\nChoose an option:")
-        print("[1] Start Monitoring (infinite)")
-        print("[2] View Logs")
-        print("[3] Save This Network as Trusted")
-        print("[4] Exit")
-        choice = input("Enter choice: ")
+        print("\n[1] Start monitoring\n[2] View logs\n[3] Save this Wi-Fi as trusted\n[4] Exit")
+        ch=input("Choice: ")
+        if ch=="1":
+            if _is_trusted():
+                print("✅ Trusted network—skipping monitor.")
+                continue
+            start_universal_intake(recv)
+            threading.Thread(target=_sniff_local,args=(recv,),daemon=True).start()
+            try:
+                while True: time.sleep(CHECK_INTERVAL)
+            except KeyboardInterrupt: print("\n🛑 Stopped.")
+        elif ch=="2": _view_logs()
+        elif ch=="3": save_current_as_trusted()
+        elif ch=="4": break
+        else: print("Invalid.")
 
-        if choice == "1":
-            if is_trusted_network():
-                print("✅ Connected to a trusted network. Monitoring skipped.")
-            else:
-                start_monitoring(receiver_email)
-        elif choice == "2":
-            view_logs()
-        elif choice == "3":
-            save_current_as_trusted()
-        elif choice == "4":
-            print("Exiting...")
-            break
-        else:
-            print("Invalid choice.")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
