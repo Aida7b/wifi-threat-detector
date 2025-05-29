@@ -2,7 +2,6 @@ import time
 import datetime
 import os
 import smtplib
-import psutil
 import requests
 import folium
 import webbrowser
@@ -14,12 +13,50 @@ from scapy.all import sniff, IP, TCP
 # === CONFIGURATION ===
 LOG_FILE = "port_attack_log.txt"
 CHECK_INTERVAL = 10  # seconds
+TRUSTED_FILE = "trusted_network.txt"
 SENDER_EMAIL = "space.art0007@gmail.com"
 SENDER_PASSWORD = "esugedhsjlukpqwm"  # app password
 SUSPICIOUS_PORTS = [22, 23, 3389, 4444, 5555, 8080, 31337]
 seen_sniffed_ips = set()
 
-# === FUNCTIONS ===
+# === TRUSTED NETWORK LOGIC ===
+
+def get_current_network_info():
+    ssid = "Unknown"
+    gateway = "Unknown"
+    try:
+        ssid_data = os.popen("netsh wlan show interfaces").read()
+        for line in ssid_data.splitlines():
+            if "SSID" in line and "BSSID" not in line:
+                ssid = line.split(":")[1].strip()
+                break
+
+        ipconfig_data = os.popen("ipconfig").read()
+        for line in ipconfig_data.splitlines():
+            if "Default Gateway" in line:
+                gateway = line.split(":")[1].strip()
+                break
+    except:
+        pass
+    return ssid, gateway
+
+def save_current_as_trusted():
+    ssid, gateway = get_current_network_info()
+    with open(TRUSTED_FILE, "w") as f:
+        f.write(f"{ssid}|{gateway}")
+    print(f"✅ Trusted network saved: SSID = {ssid}, Gateway = {gateway}")
+
+def is_trusted_network():
+    if not os.path.exists(TRUSTED_FILE):
+        return False
+    try:
+        trusted_ssid, trusted_gateway = open(TRUSTED_FILE).read().strip().split("|")
+        current_ssid, current_gateway = get_current_network_info()
+        return current_ssid == trusted_ssid and current_gateway == trusted_gateway
+    except:
+        return False
+
+# === ALERT + GEO ===
 
 def geolocate_ip(ip):
     try:
@@ -52,7 +89,6 @@ Remote IP: {attacker_ip}
 
 This may indicate a scanning, brute-force or unauthorized access attempt.
 """
-
     msg = MIMEMultipart()
     msg["From"] = SENDER_EMAIL
     msg["To"] = to_email
@@ -68,13 +104,7 @@ This may indicate a scanning, brute-force or unauthorized access attempt.
     except Exception as e:
         print(f"❌ Failed to send email: {e}")
 
-def detect_port_attacks():
-    alerts = []
-    for conn in psutil.net_connections(kind='inet'):
-        if conn.status in ['LISTEN', 'ESTABLISHED'] and conn.laddr.port in SUSPICIOUS_PORTS:
-            remote_ip = conn.raddr.ip if conn.raddr else "Unknown"
-            alerts.append((conn.laddr.port, remote_ip))
-    return alerts
+# === MONITORING ===
 
 def packet_sniffer(receiver_email):
     def process_packet(pkt):
@@ -90,7 +120,6 @@ def packet_sniffer(receiver_email):
                     print(log_entry)
                     with open(LOG_FILE, "a") as f:
                         f.write(log_entry + "\n")
-
                     map_file = generate_map(src_ip)
                     send_email_alert(timestamp, dport, src_ip, receiver_email, map_file)
 
@@ -99,37 +128,14 @@ def packet_sniffer(receiver_email):
 
 def start_monitoring(receiver_email):
     print("\n🔍 Continuous monitoring started. Press Ctrl+C to stop.\n")
-    seen_alerts = set()
-
-    # Start background sniffing thread
     threading.Thread(target=packet_sniffer, args=(receiver_email,), daemon=True).start()
-
     try:
         while True:
-            timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            alerts = detect_port_attacks()
-
-            for port, attacker_ip in alerts:
-                alert_key = f"{port}-{attacker_ip}"
-                if alert_key in seen_alerts:
-                    continue
-                seen_alerts.add(alert_key)
-
-                log_entry = f"[{timestamp}] Suspicious on port {port}, remote IP: {attacker_ip}"
-                print(log_entry)
-                with open(LOG_FILE, "a") as f:
-                    f.write(log_entry + "\n")
-
-                map_file = None
-                if attacker_ip != "Unknown":
-                    map_file = generate_map(attacker_ip)
-
-                send_email_alert(timestamp, port, attacker_ip, receiver_email, map_file)
-
             time.sleep(CHECK_INTERVAL)
-
     except KeyboardInterrupt:
         print("\n🛑 Monitoring stopped by user.")
+
+# === LOG VIEW ===
 
 def view_logs():
     print("\n📜 Port Attack Logs:")
@@ -139,6 +145,8 @@ def view_logs():
     else:
         print("No logs found.")
 
+# === MAIN MENU ===
+
 def main():
     print("\n🚨 Suspicious Port Detection Tool")
     receiver_email = input("Enter your email to receive alerts: ").strip()
@@ -147,14 +155,20 @@ def main():
         print("\nChoose an option:")
         print("[1] Start Monitoring (infinite)")
         print("[2] View Logs")
-        print("[3] Exit")
+        print("[3] Save This Network as Trusted")
+        print("[4] Exit")
         choice = input("Enter choice: ")
 
         if choice == "1":
-            start_monitoring(receiver_email)
+            if is_trusted_network():
+                print("✅ Connected to a trusted network. Monitoring skipped.")
+            else:
+                start_monitoring(receiver_email)
         elif choice == "2":
             view_logs()
         elif choice == "3":
+            save_current_as_trusted()
+        elif choice == "4":
             print("Exiting...")
             break
         else:
