@@ -114,15 +114,18 @@ def packet_sniffer(receiver_email, selected_iface):
                 src_ip = pkt[IP].src
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-                # NAT detection logic
-                if src_ip == "192.168.1.1":  # Internal IP of the Fortinet firewall/router
+                # NAT detection logic + public IP fallback for map
+                if src_ip == "192.168.1.1":
                     try:
                         real_ip = requests.get("https://api.ipify.org").text.strip()
                         src_ip_note = f"{src_ip} (NAT gateway) — possible public attacker IP: {real_ip}"
+                        map_target_ip = real_ip
                     except:
                         src_ip_note = f"{src_ip} (NAT gateway)"
+                        map_target_ip = src_ip
                 else:
                     src_ip_note = src_ip
+                    map_target_ip = src_ip
 
                 log_entry = f"[{timestamp}] Incoming packet to port {dport} from IP: {src_ip_note}"
                 print(log_entry)
@@ -132,7 +135,7 @@ def packet_sniffer(receiver_email, selected_iface):
                 alert_key = f"{dport}-{src_ip}"
                 if alert_key not in seen_sniffed_ips:
                     seen_sniffed_ips.add(alert_key)
-                    map_file = generate_map(src_ip)
+                    map_file = generate_map(map_target_ip)
                     send_email_alert(timestamp, dport, src_ip_note, receiver_email, map_file)
 
     print(f"\n📡 Automatically sniffing on interface: {selected_iface}")
